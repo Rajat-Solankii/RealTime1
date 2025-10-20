@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Bus Tracker</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f4f9; color: #333; margin: 0; }
+        .container { display: flex; flex-direction: column; height: 100vh; }
+        .panel { padding: 1.5rem; background: white; box-shadow: 0 2px 5px rgba(0,0,0,0.1); z-index: 10; }
+        h1 { margin: 0; font-size: 1.5rem; text-align: center;}
+        .route-selector { display: flex; gap: 10px; margin-top: 1rem; }
+        .route-selector select, .route-selector button { flex-grow: 1; padding: 10px; font-size: 16px; border-radius: 6px; border: 1px solid #ccc; }
+        .route-selector button { background-color: #28a745; color: white; cursor: pointer; border: none; }
+        .info-bar { padding: 1rem; background-color: #eef2ff; text-align: center; }
+        #map { flex-grow: 1; z-index: 5; }
+        #status .loader { border: 3px solid #f3f3f3; border-top: 3px solid #3498db; border-radius: 50%; width: 16px; height: 16px; animation: spin 1s linear infinite; margin-right: 8px; display: inline-block; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="panel">
+            <h1>Live Bus Tracker 🚌</h1>
+            <div class="route-selector">
+                <select id="routes-dropdown"></select>
+                <button onclick="findMyBus()">Find My Bus</button>
+            </div>
+        </div>
+        <div class="info-bar">
+            <strong id="status">Please select a route to begin.</strong>
+        </div>
+        <div id="map"></div>
+    </div>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const routesDropdown = document.getElementById('routes-dropdown');
+        let map, userMarker, busMarker, stopMarker, routeLayerGroup;
+
+        function initMap() {
+            map = L.map('map').setView([28.9845, 77.0179], 12);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+            routeLayerGroup = L.layerGroup().addTo(map);
+        }
+
+        async function loadActiveRoutes() {
+            try {
+                const response = await fetch('/api/active_routes');
+                const routes = await response.json();
+                routesDropdown.innerHTML = '<option value="">-- Select Available Route --</option>';
+                routes.forEach(route => {
+                    const option = document.createElement('option');
+                    option.value = route;
+                    option.textContent = route;
+                    routesDropdown.appendChild(option);
+                });
+            } catch (error) {
+                updateStatus("Could not fetch active routes.");
+            }
+        }
+
+        function updateStatus(message, isLoading = false) {
+            statusEl.innerHTML = isLoading ? `<div class="loader"></div> ${message}` : message;
+        }
+
+        async function findMyBus() {
+            const selectedRoute = routesDropdown.value;
+            if (!selectedRoute) {
+                updateStatus("Please select a route first.");
+                return;
+            }
+            updateStatus("Finding the closest bus...", true);
+            routeLayerGroup.clearLayers();
+
+            navigator.geolocation.getCurrentPosition(async (position) => {
+                const { latitude, longitude } = position.coords;
+                
+                if (!userMarker) {
+                    userMarker = L.marker([latitude, longitude]).bindPopup('Your Location').addTo(map);
+                } else {
+                    userMarker.setLatLng([latitude, longitude]);
+                }
+
+                try {
+                    const statusResponse = await fetch(`/api/bus_status?lat=${latitude}&lon=${longitude}&routeName=${selectedRoute}`);
+                    const data = await statusResponse.json();
+
+                    if (data.status === "Bus is active.") {
+                        updateStatus(`ETA: ${data.eta} min to ${data.nearestStop.name}`);
+                        
+                        if (!busMarker) {
+                            busMarker = L.marker(data.busLocation, {
+                                icon: L.icon({ iconUrl: 'https://cdn-icons-png.flaticon.com/128/3448/3448609.png', iconSize: [40, 40] })
+                            }).bindPopup(`Bus ID: ${data.busId}`).addTo(map);
+                        } else {
+                            busMarker.setLatLng(data.busLocation);
+                        }
+                        
+                        if(stopMarker) stopMarker.remove();
+                        stopMarker = L.marker(data.nearestStop.coords).bindPopup(`Your Stop: ${data.nearestStop.name}`).addTo(routeLayerGroup);
+
+                        const routeResponse = await fetch(`/api/get_route_data?routeName=${selectedRoute}`);
+                        const routeData = await routeResponse.json();
+                        const latLngs = Object.values(routeData.stops);
+                        L.polyline(latLngs, { color: 'blue' }).addTo(routeLayerGroup);
+                        
+                        map.fitBounds([userMarker.getLatLng(), busMarker.getLatLng(), stopMarker.getLatLng()], { padding: [50, 50] });
+
+                    } else {
+                        updateStatus(data.status || "Could not fetch bus status.");
+                    }
+                } catch (error) {
+                    updateStatus("Error fetching data from server.");
+                }
+            }, () => {
+                updateStatus("Error: Please enable location access.");
+            });
+        }
+
+        window.onload = () => {
+            initMap();
+            loadActiveRoutes();
+        };
+    </script>
+</body>
+</html>

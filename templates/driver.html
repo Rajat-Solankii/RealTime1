@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Driver Panel</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #333; background-color: #f4f4f9; margin: 0; padding: 1rem; }
+        .panel { max-width: 800px; margin: 0 auto; background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h2, h3 { border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        .form-group { margin-bottom: 1rem; position: relative; z-index: 10; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input, button { width: 100%; padding: 12px; border-radius: 6px; border: 1px solid #ccc; box-sizing: border-box; font-size: 16px; }
+        button { background-color: #007bff; color: white; border: none; cursor: pointer; }
+        button:disabled { background-color: #aaa; cursor: not-allowed; }
+        #map { height: 400px; border-radius: 8px; margin-bottom: 1rem; position: relative; z-index: 5; }
+        .autocomplete-suggestions { border: 1px solid #ddd; background: #fff; position: absolute; top: 100%; left: 0; right: 0; z-index: 999; }
+        .autocomplete-suggestions div { padding: 10px; cursor: pointer; }
+        .autocomplete-suggestions div:hover { background: #f0f0f0; }
+        #stops-list { list-style: decimal; padding-left: 20px; }
+        #stops-list li { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .remove-btn { background-color: #dc3545; color: white; border: none; padding: 4px 10px; font-size: 12px; border-radius: 4px; cursor: pointer; width: auto; }
+    </style>
+</head>
+<body>
+    <div class="panel">
+        <h2>1. Create Route</h2>
+        <div class="form-group">
+            <label for="route-name">Route Name</label>
+            <input type="text" id="route-name" placeholder="Route-101">
+        </div>
+        <div class="form-group">
+            <label for="stop-input">Add a Stop</label>
+            <input type="text" id="stop-input" placeholder="Type a bus stand or address..." onkeyup="handleAutocomplete()">
+            <div class="autocomplete-suggestions" id="autocomplete-list"></div>
+        </div>
+        <h3>Current Route Stops</h3>
+        <ul id="stops-list"></ul>
+        <div id="map"></div>
+        <button id="save-route-btn" onclick="saveRoute()">Save Route</button>
+        <p id="route-status"></p>
+
+        <hr style="margin: 2rem 0;">
+
+        <h2>2. Start Driving</h2>
+        <div class="form-group">
+            <label for="bus-id">Your Bus ID</label>
+            <input type="text" id="bus-id" placeholder="Haryana Roadways">
+        </div>
+        <div class="form-group">
+            <label for="active-route">Route to Drive</label>
+            <input type="text" id="active-route" placeholder="Route-101">
+        </div>
+        <button id="start-driving-btn" onclick="startDriving()">Start Broadcasting Location</button>
+        <p id="driving-status"></p>
+    </div>
+
+    <script>
+        let map, routeStops = [], routeLayerGroup, debounceTimer, trackingInterval;
+
+        function initMap() {
+            map = L.map('map').setView([28.9845, 77.0179], 12); // Sonipat view
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(map);
+            routeLayerGroup = L.layerGroup().addTo(map);
+        }
+
+        function handleAutocomplete() {
+            clearTimeout(debounceTimer);
+            const query = document.getElementById('stop-input').value;
+            const suggestionsEl = document.getElementById('autocomplete-list');
+            if (query.length < 3) { suggestionsEl.innerHTML = ''; return; }
+            debounceTimer = setTimeout(async () => {
+                const response = await fetch(`/api/autocomplete?q=${query}`);
+                const suggestions = await response.json();
+                suggestionsEl.innerHTML = '';
+                suggestions.forEach(s => {
+                    const div = document.createElement('div');
+                    div.textContent = s.display_name;
+                    div.onclick = () => addStop(s.display_name, s.lat, s.lon);
+                    suggestionsEl.appendChild(div);
+                });
+            }, 300);
+        }
+
+        function addStop(name, lat, lon) {
+            routeStops.push({ name: name, coords: [lat, lon] });
+            document.getElementById('stop-input').value = '';
+            document.getElementById('autocomplete-list').innerHTML = '';
+            updateUIAndMap();
+        }
+        
+        function removeStop(index) {
+            routeStops.splice(index, 1);
+            updateUIAndMap();
+        }
+
+        function updateUIAndMap() {
+            const stopsListEl = document.getElementById('stops-list');
+            stopsListEl.innerHTML = '';
+            routeLayerGroup.clearLayers();
+            const latLngs = [];
+            routeStops.forEach((stop, index) => {
+                const li = document.createElement('li');
+                const span = document.createElement('span');
+                span.textContent = stop.name;
+                const removeBtn = document.createElement('button');
+                removeBtn.textContent = 'Remove';
+                removeBtn.className = 'remove-btn';
+                removeBtn.onclick = () => removeStop(index);
+                li.appendChild(span);
+                li.appendChild(removeBtn);
+                stopsListEl.appendChild(li);
+                L.marker(stop.coords).bindPopup(stop.name).addTo(routeLayerGroup);
+                latLngs.push(stop.coords);
+            });
+            if (latLngs.length > 1) {
+                L.polyline(latLngs, { color: 'blue' }).addTo(routeLayerGroup);
+                map.fitBounds(latLngs);
+            } else if (latLngs.length === 1) {
+                map.setView(latLngs[0], 13);
+            }
+        }
+        
+        async function saveRoute() {
+            const saveBtn = document.getElementById('save-route-btn');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+            const routeName = document.getElementById('route-name').value;
+            const stopNames = routeStops.map(s => s.name);
+            if (!routeName || stopNames.length < 2) {
+                document.getElementById('route-status').textContent = "Please provide a route name and at least 2 stops.";
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Save Route';
+                return;
+            }
+            const response = await fetch('/api/create_route', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ routeName, stops: stopNames })
+            });
+            const data = await response.json();
+            document.getElementById('route-status').textContent = data.message;
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save Route';
+        }
+
+        async function startDriving() {
+            if (trackingInterval) clearInterval(trackingInterval);
+            const startBtn = document.getElementById('start-driving-btn');
+            const drivingStatusEl = document.getElementById('driving-status');
+            startBtn.disabled = true;
+            startBtn.textContent = "Initializing...";
+            drivingStatusEl.textContent = "Fetching route data...";
+            const routeName = document.getElementById('active-route').value;
+            if (!routeName) {
+                drivingStatusEl.textContent = "Please provide a Route Name.";
+                startBtn.disabled = false;
+                startBtn.textContent = "Start Broadcasting Location";
+                return;
+            }
+            let destinationCoords;
+            try {
+                const response = await fetch(`/api/get_route_data?routeName=${routeName}`);
+                if (!response.ok) throw new Error("Route not found on server.");
+                const data = await response.json();
+                const stops = Object.values(data.stops);
+                if (stops.length > 0) {
+                    destinationCoords = stops[stops.length - 1];
+                } else { throw new Error("Route has no stops."); }
+            } catch (error) {
+                drivingStatusEl.textContent = `❌ Error: Could not load route data. (${error.message})`;
+                startBtn.disabled = false;
+                startBtn.textContent = "Start Broadcasting Location";
+                return;
+            }
+            trackingInterval = setInterval(() => {
+                navigator.geolocation.getCurrentPosition(async (position) => {
+                    const { latitude, longitude } = position.coords;
+                    const dx = latitude - destinationCoords[0];
+                    const dy = longitude - destinationCoords[1];
+                    const distance = Math.sqrt(dx*dx + dy*dy) * 111.32;
+                    if (distance < 0.05) {
+                        clearInterval(trackingInterval);
+                        drivingStatusEl.textContent = "✅ Destination reached. Broadcasting stopped.";
+                        startBtn.disabled = false;
+                        startBtn.textContent = "Start Broadcasting Location";
+                        return;
+                    }
+                    const busId = document.getElementById('bus-id').value;
+                    await fetch('/api/update_location', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ busId, route: routeName, location: [latitude, longitude] })
+                    });
+                    drivingStatusEl.textContent = `✅ Location updated at ${new Date().toLocaleTimeString()}`;
+                    startBtn.textContent = "Broadcasting Live...";
+                }, () => {
+                    drivingStatusEl.textContent = "❌ Error: Please enable location access.";
+                    clearInterval(trackingInterval);
+                    startBtn.disabled = false;
+                    startBtn.textContent = "Start Broadcasting Location";
+                });
+            }, 5000);
+        }
+
+        window.onload = initMap;
+    </script>
+</body>
+</html>
